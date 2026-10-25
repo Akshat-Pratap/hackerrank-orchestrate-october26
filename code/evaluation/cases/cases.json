@@ -1,0 +1,51 @@
+{
+  "custom_cases": [
+    {
+      "case_id": "custom_case_01",
+      "email": "user.marketing@example.com",
+      "requested_at": "2026-05-01T10:00:00Z",
+      "reported_status": "COMPLETE",
+      "reported_at": "2026-05-01T11:00:00Z",
+      "audit_at": "2026-05-01T12:00:00Z",
+      "request_text": "Please remove me from all marketing and promotional emails. I no longer wish to receive newsletters.",
+      "expected_status": "NOT_APPLICABLE",
+      "expected_steps": [],
+      "description": "Non-deletion request: Marketing unsubscribe request does not authorize account deletion."
+    },
+    {
+      "case_id": "custom_case_02",
+      "email": "user.activeflow@example.com",
+      "requested_at": "2026-05-02T10:00:00Z",
+      "reported_status": "PARTIALLY_COMPLETE",
+      "reported_at": "2026-05-02T11:00:00Z",
+      "audit_at": "2026-05-02T12:00:00Z",
+      "request_text": "I hereby request permanent deletion of all my personal data and account under GDPR Article 17.",
+      "expected_status": "INCOMPLETE",
+      "expected_steps": [
+        {"step_no": 1, "phase": "FINDING", "system_id": "integration_service", "resource_id": "data_flow_901", "operation": "REPORT_ACTIVE_DATA_FLOW", "state": "ACTIVE", "evidence_id": "evidence_mock_01"},
+        {"step_no": 2, "phase": "FINDING", "system_id": "support_platform", "resource_id": "support_902", "operation": "REPORT_EXPOSED_PII", "state": "PRESENT", "evidence_id": "evidence_mock_01"},
+        {"step_no": 3, "phase": "REMEDIATION", "system_id": "integration_service", "resource_id": "data_flow_901", "operation": "DISABLE_DATA_FLOW", "state": "DISABLED", "evidence_id": ""},
+        {"step_no": 4, "phase": "REMEDIATION", "system_id": "support_platform", "resource_id": "support_902", "operation": "REDACT_RECORD", "state": "REDACTED", "evidence_id": ""},
+        {"step_no": 5, "phase": "VERIFICATION", "system_id": "account_service", "resource_id": "account_901", "operation": "VERIFY_RECORD_ABSENT", "state": "ABSENT", "evidence_id": ""},
+        {"step_no": 6, "phase": "VERIFICATION", "system_id": "integration_service", "resource_id": "data_flow_901", "operation": "VERIFY_DATA_FLOW_DISABLED", "state": "DISABLED", "evidence_id": ""},
+        {"step_no": 7, "phase": "VERIFICATION", "system_id": "support_platform", "resource_id": "support_902", "operation": "VERIFY_RECORD_REDACTED", "state": "REDACTED", "evidence_id": ""}
+      ],
+      "description": "Incomplete deletion: Active synchronization pipeline and unredacted support conversation."
+    },
+    {
+      "case_id": "custom_case_03",
+      "email": "user.compliant@example.com",
+      "requested_at": "2026-05-03T10:00:00Z",
+      "reported_status": "COMPLETE",
+      "reported_at": "2026-05-03T11:00:00Z",
+      "audit_at": "2026-05-03T12:00:00Z",
+      "request_text": "Please erase all my personal data from your systems.",
+      "expected_status": "COMPLETE",
+      "expected_steps": [
+        {"step_no": 1, "phase": "VERIFICATION", "system_id": "account_service", "resource_id": "account_903", "operation": "VERIFY_RECORD_ABSENT", "state": "ABSENT", "evidence_id": "evidence_mock_02"},
+        {"step_no": 2, "phase": "VERIFICATION", "system_id": "security_service", "resource_id": "audit_record_903", "operation": "VERIFY_RECORD_PRESENT", "state": "PRESENT", "evidence_id": "evidence_mock_02"}
+      ],
+      "description": "Complete deletion: Account absent, security audit log correctly preserved under retention policy."
+    }
+  ]
+}
