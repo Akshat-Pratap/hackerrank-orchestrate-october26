@@ -86,8 +86,11 @@ def validate_output(output_path, evidence_csv_path=None):
         if phase_indices != sorted(phase_indices):
             errors.append(f"{cid}: phases not in order")
 
-        # Check COMPLETE cases have only VERIFICATION
+        # Check COMPLETE cases have only VERIFICATION and non-empty steps
         if r['deletion_status'] == 'COMPLETE':
+            if not steps:
+                errors.append(f"{cid}: COMPLETE case has empty steps")
+                continue
             for s in steps:
                 if s.get('phase') != 'VERIFICATION':
                     errors.append(f"{cid}: COMPLETE case has non-VERIFICATION step")

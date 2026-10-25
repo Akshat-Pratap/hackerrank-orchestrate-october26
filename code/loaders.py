@@ -484,86 +484,203 @@ def _parse_json_list(file_id, data, captured_at):
 
 
 def _parse_json_dict(file_id, data, captured_at):
-    """Fallback: flatten a generic dict."""
+    """Fallback: flatten a generic dict, handling export jobs and audit ledgers."""
     obs = []
+    top_source = data.get('source') or data.get('origin') or ''
+    top_coll = data.get('collection', '')
+    top_captured = data.get('captured_at') or data.get('exported_at') or captured_at
+
     for key, val in data.items():
         if isinstance(val, list):
             for rec in val:
                 if isinstance(rec, dict) and rec.get('resource_id'):
                     rid = rec['resource_id']
-                    cat = _cat(key, rid)
+                    rec_sys = rec.get('system') or rec.get('system_id')
+                    if rec_sys:
+                        sys_id = rec_sys
+                    elif 'export' in top_coll or 'export' in top_source or rid.startswith('export_'):
+                        sys_id = 'export_service'
+                    elif 'audit' in top_source or rid.startswith('audit_'):
+                        sys_id = 'security_service'
+                    elif key in ('records', 'items', 'entries'):
+                        sys_id = _system_from_resource_id(rid)
+                    else:
+                        sys_id = key
+
+                    rec_type = rec.get('record_type')
+                    if rec_type:
+                        cat = rec_type
+                    elif 'export' in top_coll or rid.startswith('export_'):
+                        cat = 'USER_EXPORT'
+                    else:
+                        cat = _cat(sys_id, rid, top_coll)
+
                     uid = rec.get('user_id') or rec.get('customer_reference')
-                    email = (rec.get('email') or '').lower() or None
+                    email = (rec.get('email') or rec.get('owner_email') or rec.get('customer_email') or rec.get('requester_email') or '').lower() or None
+                    phone = rec.get('phone') or rec.get('owner_phone') or rec.get('requester_phone')
+                    ehash = rec.get('email_hash')
+
+                    subj = rec.get('subject_reference')
+                    if subj:
+                        if '@' in subj:
+                            email = subj.lower()
+                        elif subj.startswith('user_'):
+                            uid = subj
+
+                    if 'download_available' in rec:
+                        state = 'PRESENT' if rec['download_available'] else 'ABSENT'
+                    elif rec.get('result') == 'FOUND':
+                        state = 'PRESENT'
+                    elif rec.get('result') == 'DELETED':
+                        state = 'ABSENT'
+                    else:
+                        state = _state_from_record(rec, top_coll or key)
+
+                    rec_time = rec.get('recorded_at') or rec.get('created_at') or top_captured
+
                     obs.append({
-                        'file_id': file_id, 'system_id': key,
-                        'resource_id': rid, 'category': cat,
-                        'state': _state_from_record(rec, key),
-                        'captured_at': captured_at,
-                        'identifiers': _ids(user_id=uid, email=email),
-                        'extra': {},
+                        'file_id': file_id,
+                        'system_id': sys_id,
+                        'resource_id': rid,
+                        'category': cat,
+                        'state': state,
+                        'captured_at': rec_time,
+                        'identifiers': _ids(user_id=uid, email=email, phone=phone, email_hash=ehash),
+                        'extra': {
+                            'restore_allowed': rec.get('restore_allowed'),
+                            'enabled': rec.get('enabled'),
+                            'retention_until': rec.get('retention_until'),
+                        },
                     })
     return obs
 
 
 # ── LOG loader ─────────────────────────────────────────────────────────────────
-_LOG_RESOURCE_RE = re.compile(r'resource_id=(\S+)')
-_LOG_EMAIL_RE = re.compile(r'(?:lookup_key|email)=([\w.+\-]+@[\w.\-]+\.\w+)')
-_LOG_USER_RE = re.compile(r'(?:customer_reference|user_id|subject)=(user_\d+)')
-_LOG_STATUS_RE = re.compile(r'(?:status|result)=(\w+)')
-_LOG_SYS_RE = re.compile(r'service=(\S+)')
+_LOG_RESOURCE_RE = re.compile(r'resource_id=([\w\-]+)')
+_LOG_SYS_RE = re.compile(r'service=([\w\-]+)')
+_LOG_TRACE_RE = re.compile(r'trace_id=([\w\-]+)')
+_LOG_EMAIL_RE = re.compile(r'[\w.+\-]+@[\w.\-]+\.\w+')
+_LOG_USER_RE = re.compile(r'\b(user_\d+)\b')
+_LOG_HASH_RE = re.compile(r'\b([a-fA-F0-9]{64})\b')
+_LOG_STATUS_RE = re.compile(r'(?:http_status|status|result)=(\w+)')
+_LOG_TIME_RE = re.compile(r'^(\d{4}-\d{2}-\d{2}T[\d:.]+Z?)')
 
 
 def _load_log(file_id, path, captured_at):
     obs = []
-    seen = {}  # (sys_id, resource_id) -> ob
+    traces = defaultdict(lambda: {
+        'identifiers': {},
+        'events': [],
+        'lines': [],
+    })
+    standalone = []
 
     with open(path, encoding='utf-8', errors='replace') as f:
         for line in f:
+            t_m = _LOG_TIME_RE.match(line)
+            l_time = t_m.group(1) if t_m else captured_at
+
+            tr_m = _LOG_TRACE_RE.search(line)
+            tr_id = tr_m.group(1) if tr_m else None
+
             rid_m = _LOG_RESOURCE_RE.search(line)
-            if not rid_m:
-                continue
-            rid = rid_m.group(1).rstrip('.,;')
+            rid = rid_m.group(1).rstrip('.,;') if rid_m else None
 
-            email_m = _LOG_EMAIL_RE.search(line)
-            user_m = _LOG_USER_RE.search(line)
             sys_m = _LOG_SYS_RE.search(line)
-            status_m = _LOG_STATUS_RE.search(line)
+            sys_id = sys_m.group(1) if sys_m else None
 
-            email = email_m.group(1).lower() if email_m else None
-            uid = user_m.group(1) if user_m else None
-            sys_id = sys_m.group(1) if sys_m else 'unknown_service'
-            status_code = status_m.group(1).upper() if status_m else None
+            em_m = _LOG_EMAIL_RE.search(line)
+            email = em_m.group(0).lower() if em_m else None
 
-            # State from status / HTTP code
+            u_m = _LOG_USER_RE.search(line)
+            uid = u_m.group(1) if u_m else None
+
+            h_m = _LOG_HASH_RE.search(line)
+            ehash = h_m.group(1) if h_m else None
+
+            st_m = _LOG_STATUS_RE.search(line)
+            status_code = st_m.group(1).upper() if st_m else None
+
+            # State determination
             state = 'PRESENT'
-            if status_code in ('404', 'NOT_FOUND', 'DELETED', 'ABSENT'):
+            if status_code in ('404', 'NOT_FOUND', 'DELETED', 'ABSENT') or 'rows=0' in line:
                 state = 'ABSENT'
-            elif status_code in ('200', 'OK', 'FOUND'):
+            elif 'eligible=true deletion_block=false' in line:
+                state = 'ACTIVE'
+            elif 'remains enabled' in line or 'enabled=true' in line:
+                state = 'ACTIVE'
+            elif 'rows=1' in line or 'result=hit' in line or 'matched_value' in line:
                 state = 'PRESENT'
 
-            cat = _cat(sys_id, rid)
-            key = (sys_id, rid)
-            if key not in seen:
-                ob = {
-                    'file_id': file_id, 'system_id': sys_id,
-                    'resource_id': rid, 'category': cat,
-                    'state': state, 'captured_at': captured_at,
-                    'identifiers': _ids(user_id=uid, email=email,
-                                        lookup_key=email),
+            if tr_id:
+                traces[tr_id]['lines'].append(line)
+                if email and not traces[tr_id]['identifiers'].get('email'):
+                    traces[tr_id]['identifiers']['email'] = email
+                if uid and not traces[tr_id]['identifiers'].get('user_id'):
+                    traces[tr_id]['identifiers']['user_id'] = uid
+                if ehash and not traces[tr_id]['identifiers'].get('email_hash'):
+                    traces[tr_id]['identifiers']['email_hash'] = ehash
+                if rid:
+                    s_id = sys_id or _system_from_resource_id(rid)
+                    traces[tr_id]['events'].append({
+                        'resource_id': rid,
+                        'system_id': s_id,
+                        'state': state,
+                        'time': l_time,
+                    })
+            elif rid:
+                s_id = sys_id or _system_from_resource_id(rid)
+                standalone.append({
+                    'file_id': file_id,
+                    'system_id': s_id,
+                    'resource_id': rid,
+                    'category': _cat(s_id, rid),
+                    'state': state,
+                    'captured_at': l_time,
+                    'identifiers': _ids(user_id=uid, email=email, email_hash=ehash, lookup_key=email),
                     'extra': {},
-                }
+                })
+
+    # Convert trace events into observations
+    seen = {}
+    for tr_id, tr_data in traces.items():
+        ids = tr_data['identifiers']
+        for ev in tr_data['events']:
+            rid = ev['resource_id']
+            sys_id = ev['system_id']
+            key = (sys_id, rid)
+            cat = _cat(sys_id, rid)
+            ob = {
+                'file_id': file_id,
+                'system_id': sys_id,
+                'resource_id': rid,
+                'category': cat,
+                'state': ev['state'],
+                'captured_at': ev['time'],
+                'identifiers': _ids(
+                    user_id=ids.get('user_id'),
+                    email=ids.get('email'),
+                    email_hash=ids.get('email_hash'),
+                    lookup_key=ids.get('email'),
+                ),
+                'extra': {},
+            }
+            if key not in seen:
                 seen[key] = ob
                 obs.append(ob)
             else:
-                ob = seen[key]
-                if email and not ob['identifiers'].get('email'):
-                    ob['identifiers']['email'] = email
-                if uid and not ob['identifiers'].get('user_id'):
-                    ob['identifiers']['user_id'] = uid
-                # Update state if we get a more informative status
-                if state in ('ABSENT',):
-                    ob['state'] = state
+                # Merge identifiers and prefer latest / ABSENT state
+                cur = seen[key]
+                if ids.get('email') and not cur['identifiers'].get('email'):
+                    cur['identifiers']['email'] = ids.get('email')
+                if ids.get('user_id') and not cur['identifiers'].get('user_id'):
+                    cur['identifiers']['user_id'] = ids.get('user_id')
+                if ids.get('email_hash') and not cur['identifiers'].get('email_hash'):
+                    cur['identifiers']['email_hash'] = ids.get('email_hash')
+                if ev['state'] in ('ABSENT', 'ACTIVE'):
+                    cur['state'] = ev['state']
 
+    obs.extend(standalone)
     return obs
 
 

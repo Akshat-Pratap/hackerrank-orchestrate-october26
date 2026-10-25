@@ -9,8 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from loaders import load_all_evidence, load_evidence_manifest
 from identity import build_identity_index
-from main import (load_csv, DATASET, CACHE_DIR, _is_non_deletion, _find_user_resources,
-                  _apply_policy, _number_steps, _build_account_cluster_map)
+from main import (load_csv, DATASET, CACHE_DIR, _decide, _number_steps, _build_account_cluster_map)
 from collections import defaultdict
 
 SAMPLE_OUTPUT = os.path.join(DATASET, 'sample_output.csv')
@@ -47,6 +46,9 @@ def run_and_score():
         activity_by_resource[k].sort(key=lambda a: a['event_time'])
 
     account_cluster_map = _build_account_cluster_map(sample_requests, system_activity, id_index)
+    classify_requests = {act['resource_id']: act['event_time']
+                         for act in system_activity if act['event_type'] == 'CLASSIFY_REQUEST'}
+    manifest_by_time = sorted(evidence_manifest.values(), key=lambda e: e['captured_at'])
 
     with open(SAMPLE_OUTPUT, encoding='utf-8') as f:
         truth = {r['case_id']: r for r in csv.DictReader(f)}
@@ -54,32 +56,10 @@ def run_and_score():
     results = {}
     for req in sample_requests:
         cid = req['case_id']
-        email = req['email'].strip().lower()
-        audit_at = req['audit_at']
-        request_text = req.get('request_text', '')
-
-        user_id = id_index.resolve_email(email)
-        if user_id is None:
-            results[cid] = ('NOT_APPLICABLE', [])
-            continue
-
-        identifiers = id_index.get_identifiers(user_id)
-        all_emails = identifiers.get('emails', set()) | {email}
-        all_phones = identifiers.get('phones', set())
-        all_hashes = identifiers.get('email_hashes', set())
-        account_id = identifiers.get('account_id', '')
-
-        if _is_non_deletion(request_text):
-            results[cid] = ('NOT_APPLICABLE', [])
-            continue
-
-        user_resources = _find_user_resources(
-            user_id, all_emails, all_phones, all_hashes, account_id,
-            obs_by_resource, obs_by_user, obs_by_email,
-            activity_by_resource, account_cluster_map, audit_at)
-
-        steps, is_complete = _apply_policy(user_resources, audit_at)
-        status = 'COMPLETE' if is_complete else 'INCOMPLETE'
+        status, steps = _decide(
+            req, id_index, obs_by_resource, obs_by_user, obs_by_email,
+            activity_by_resource, account_cluster_map,
+            classify_requests=classify_requests, manifest_by_time=manifest_by_time)
         numbered = _number_steps(steps, status)
         results[cid] = (status, numbered)
 
