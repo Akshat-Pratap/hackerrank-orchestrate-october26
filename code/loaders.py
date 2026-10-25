@@ -208,6 +208,8 @@ def _load_sql(file_id, path, captured_at):
                     email = (rj.get('email') or rj.get('owner_email') or 
                              rj.get('requester_email') or doc.get('email') or 
                              (sel if sel and '@' in sel else None))
+                    if email:
+                        email = email.lower()
                     phone = (rj.get('phone') or rj.get('owner_phone') or 
                              rj.get('requester_phone') or doc.get('phone'))
                     email_hash = rj.get('email_hash') or doc.get('email_hash')
@@ -274,6 +276,7 @@ def _load_sql(file_id, path, captured_at):
 
                     uid = rec.get('user_id') or rec.get('customer_reference') or rec.get('subject_reference')
                     email = (rec.get('email') or rec.get('customer_email') or rec.get('owner_email') or rec.get('requester_email') or '')
+                    email = email.lower() if email else None
                     phone = rec.get('phone') or rec.get('owner_phone') or rec.get('requester_phone')
                     email_hash = rec.get('email_hash')
                     lookup_key = rec.get('source_resource_id') or rec.get('lookup_key')
@@ -580,33 +583,40 @@ def _load_log(file_id, path, captured_at):
     standalone = []
 
     with open(path, encoding='utf-8', errors='replace') as f:
-        for line in f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line:
+                continue
+
             t_m = _LOG_TIME_RE.match(line)
             l_time = t_m.group(1) if t_m else captured_at
+            clean = line.replace('\\"', '"')
 
             json_obj = None
-            if '{' in line and '}' in line:
+            if '{' in clean and '}' in clean:
                 try:
-                    s_idx = line.index('{')
-                    e_idx = line.rindex('}')
-                    json_obj = json.loads(line[s_idx:e_idx+1])
+                    s_idx = clean.index('{')
+                    e_idx = clean.rindex('}')
+                    json_obj = json.loads(clean[s_idx:e_idx+1])
                 except Exception:
                     pass
 
             if json_obj:
                 l_time = json_obj.get('timestamp') or json_obj.get('time') or l_time
-                tr_id = json_obj.get('trace_id')
+                tr_id = json_obj.get('trace_id') or json_obj.get('requestId')
                 rid = json_obj.get('resource_id') or json_obj.get('entity_id') or json_obj.get('account_id')
-                sys_id = json_obj.get('service') or json_obj.get('logger') or json_obj.get('system')
+                sys_id = json_obj.get('service') or json_obj.get('logger') or json_obj.get('system') or json_obj.get('function')
                 email = (json_obj.get('email') or json_obj.get('customer_email') or
                          json_obj.get('requester_email') or json_obj.get('subject_key') or
-                         json_obj.get('lookup_key'))
+                         json_obj.get('lookup_key') or json_obj.get('correlation_key') or json_obj.get('scan_key'))
                 if email and '@' in email:
                     email = email.lower()
                 else:
                     email = None
                 uid = json_obj.get('user_id') or json_obj.get('customer_reference') or json_obj.get('subject_ref') or json_obj.get('subject_reference')
                 ehash = json_obj.get('correlation_key') or json_obj.get('email_hash')
+                if ehash and '@' in ehash:
+                    ehash = None
                 phone = json_obj.get('phone') or json_obj.get('requester_phone')
 
                 status_code = str(json_obj.get('http_status') or json_obj.get('status') or json_obj.get('result') or '').upper()
@@ -624,50 +634,76 @@ def _load_log(file_id, path, captured_at):
                     state = 'ACTIVE'
                 elif json_obj.get('enabled') is False:
                     state = 'DISABLED'
+                elif json_obj.get('direct_identifiers') in (0, '0', False, 'false'):
+                    state = 'ANONYMIZED'
+                elif json_obj.get('pii_detected') in (False, 'false'):
+                    state = 'REDACTED'
+                elif '[REDACTED]' in str(json_obj.get('message_text', '')):
+                    state = 'REDACTED'
                 elif rows == '1' or status_code in ('200', 'FOUND', 'HIT') or event in ('audit_record_read_completed', 'profile_lookup_completed'):
                     state = 'PRESENT'
             else:
-                tr_m = _LOG_TRACE_RE.search(line)
-                tr_id = tr_m.group(1) if tr_m else None
-
-                matches = re.findall(r'(\w+)=(?:"([^"]*)"|([^\s"]+))', line)
+                matches = re.findall(r'(\w+)=(?:"([^"]*)"|([^\s"]+))', clean)
                 kv = {m[0]: m[1] if m[1] != '' else m[2] for m in matches} if matches else {}
 
-                tr_id = kv.get('trace_id', tr_id)
-                rid = kv.get('resource_id', kv.get('entity_id', kv.get('account_id')))
-                if not rid:
-                    rid_m = _LOG_RESOURCE_RE.search(line)
-                    rid = rid_m.group(1).rstrip('.,;') if rid_m else None
+                tr_id = kv.get('trace_id', kv.get('requestId'))
+                if not tr_id:
+                    tr_m = re.search(r'\b(tr-[\w\-]+)\b', clean)
+                    tr_id = tr_m.group(1) if tr_m else None
 
-                sys_id = kv.get('service', kv.get('system'))
+                rid = kv.get('resource_id', kv.get('entity_id', kv.get('account_id', kv.get('profile_id', kv.get('export_id', kv.get('entry_id', kv.get('job_id', kv.get('archive_id'))))))))
+                if not rid:
+                    rid_m = re.search(r'\b((?:search|analytics|support|export|data_flow|backup|tombstone|audit_record|account|marketing)_[a-zA-Z0-9_\-]*\d+[a-zA-Z0-9_\-]*)\b', clean)
+                    rid = rid_m.group(1) if rid_m else None
+
+                if rid and (rid.endswith('_service') or rid.endswith('_platform') or rid in ('data_catalog', 'object_storage') or not any(c.isdigit() for c in rid)):
+                    rid = None
+
+                sys_id = kv.get('service', kv.get('system', kv.get('function')))
                 if not sys_id:
-                    sys_m = _LOG_SYS_RE.search(line)
-                    sys_id = sys_m.group(1) if sys_m else None
+                    if '|' in clean:
+                        parts = [p.strip() for p in clean.split('|')]
+                        if len(parts) >= 3 and ('_service' in parts[2] or '_platform' in parts[2]):
+                            sys_id = parts[2]
+                    elif '<' in clean and '>' in clean:
+                        tokens = clean.split()
+                        for tok in tokens[2:6]:
+                            if '_service' in tok or '_platform' in tok:
+                                sys_id = tok
+                                break
+                    elif '[' in clean and ']' in clean:
+                        brackets = re.findall(r'\[([\w\-]+)\]', clean)
+                        for b in brackets:
+                            if '_service' in b or '_platform' in b:
+                                sys_id = b
+                                break
 
                 subj = kv.get('subject_reference', kv.get('customer_reference', kv.get('subject_ref', '')))
-                lkey = kv.get('lookup_key', kv.get('query', ''))
+                lkey = kv.get('lookup_key', kv.get('query', kv.get('subject_key', kv.get('scan_key', kv.get('correlation_key', '')))))
                 email = None
                 if '@' in lkey:
                     email = lkey.lower()
                 elif '@' in subj:
                     email = subj.lower()
                 else:
-                    em_m = _LOG_EMAIL_RE.search(line)
+                    em_m = _LOG_EMAIL_RE.search(clean)
                     email = em_m.group(0).lower() if em_m else None
 
                 uid = None
                 if subj and subj.startswith('user_'):
                     uid = subj
                 else:
-                    u_m = _LOG_USER_RE.search(line)
+                    u_m = _LOG_USER_RE.search(clean)
                     uid = u_m.group(1) if u_m else None
 
-                ehash = kv.get('correlation_key', kv.get('email_hash'))
+                ehash = kv.get('email_hash')
+                if not ehash and kv.get('correlation_key') and '@' not in kv.get('correlation_key', ''):
+                    ehash = kv.get('correlation_key')
                 if not ehash or len(ehash) != 64:
-                    h_m = _LOG_HASH_RE.search(line)
+                    h_m = _LOG_HASH_RE.search(clean)
                     ehash = h_m.group(1) if h_m else None
 
-                phone = kv.get('phone', kv.get('requester_phone'))
+                phone = kv.get('phone', kv.get('requester_phone', kv.get('owner_phone')))
                 status_code = str(kv.get('result', kv.get('status', kv.get('http_status', '')))).upper()
                 rows = str(kv.get('rows', ''))
                 marker_found = kv.get('marker_found')
@@ -677,26 +713,32 @@ def _load_log(file_id, path, captured_at):
                     state = 'ABSENT'
                 elif marker_found == 'false':
                     state = 'PRESENT'
-                elif kv.get('deletion_block') == 'false' or kv.get('restore_allowed') == 'true' or 'eligible=true deletion_block=false' in line:
+                elif kv.get('direct_identifiers') in (0, '0', False, 'false'):
+                    state = 'ANONYMIZED'
+                elif kv.get('pii_detected') in (False, 'false'):
+                    state = 'REDACTED'
+                elif '[REDACTED]' in clean or kv.get('message_text') == '[REDACTED]':
+                    state = 'REDACTED'
+                elif kv.get('deletion_block') in ('false', False) or kv.get('restore_allowed') in ('true', True) or 'eligible=true deletion_block=false' in clean:
                     state = 'ACTIVE'
-                elif kv.get('deletion_block') == 'true' or kv.get('restore_allowed') == 'false':
+                elif kv.get('deletion_block') in ('true', True) or kv.get('restore_allowed') in ('false', False):
                     state = 'BLOCKED'
-                elif kv.get('enabled') == 'true' or 'remains enabled' in line or 'enabled=true' in line:
+                elif kv.get('enabled') in ('true', True) or 'remains enabled' in clean or 'enabled=true' in clean:
                     state = 'ACTIVE'
-                elif kv.get('enabled') == 'false':
+                elif kv.get('enabled') in ('false', False):
                     state = 'DISABLED'
-                elif rows == '1' or status_code in ('200', 'FOUND', 'HIT') or 'result=hit' in line or 'matched_value' in line:
+                elif rows == '1' or status_code in ('200', 'FOUND', 'HIT') or 'result=hit' in clean or 'matched_value' in clean:
                     state = 'PRESENT'
 
             s_id = _system_from_resource_id(rid) if rid and _system_from_resource_id(rid) != 'unknown_service' else (sys_id or 'unknown_service')
             cat = None
-            if 'email_opt_in' in line:
+            if 'email_opt_in' in clean:
                 cat = 'MARKETING_PROFILE'
-            elif 'marker_found' in line or 'support_replica' in line or 'support_replica' in path or 'legacy_contact_index' in line:
+            elif 'marker_found' in clean or 'support_replica' in clean or 'support_replica' in path or 'legacy_contact_index' in clean:
                 cat = 'SECONDARY_IDENTIFIER'
 
             if tr_id:
-                traces[tr_id]['lines'].append(line)
+                traces[tr_id]['lines'].append(clean)
                 if email and not traces[tr_id]['identifiers'].get('email'):
                     traces[tr_id]['identifiers']['email'] = email
                 if uid and not traces[tr_id]['identifiers'].get('user_id'):
