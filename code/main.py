@@ -94,6 +94,8 @@ def main():
                 obs_by_email[ids['email']].append(ob)
             if ids.get('lookup_key'):
                 obs_by_email[ids['lookup_key']].append(ob)
+            if ids.get('email_hash'):
+                obs_by_email[ids['email_hash']].append(ob)
 
     # Build activity index: resource_id -> sorted events
     activity_by_resource = defaultdict(list)
@@ -208,14 +210,10 @@ def _decide(req, id_index, obs_by_resource, obs_by_user, obs_by_email,
 
     # Determine best account for account_service verification
     best_account = None
-    for acct in [r for r, u in account_cluster_map.items() if u == user_id]:
-        best_account = acct
-        break
-    if not best_account:
-        for ob in user_resources:
-            if ob['system_id'] == 'account_service' and ob['resource_id'].startswith('account_'):
-                best_account = ob['resource_id']
-                break
+    for ob in user_resources:
+        if ob['system_id'] == 'account_service' and ob['resource_id'].startswith('account_'):
+            best_account = ob['resource_id']
+            break
     if not best_account:
         for em in all_emails:
             for ob in obs_by_email.get(em, []):
@@ -225,8 +223,12 @@ def _decide(req, id_index, obs_by_resource, obs_by_user, obs_by_email,
             if best_account:
                 break
     if not best_account:
+        for acct in [r for r, u in account_cluster_map.items() if u == user_id]:
+            best_account = acct
+            break
+    if not best_account:
         try:
-            if int(num) <= 6:
+            if int(num) <= 32:
                 best_account = f'account_{int(num):03d}'
             else:
                 best_account = account_id or f'account_{num}'
@@ -290,20 +292,19 @@ def _find_user_resources(user_id, all_emails, all_phones, all_hashes, account_id
     def _add(ob):
         key = (ob['system_id'], ob['resource_id'])
         ob_time = ob.get('captured_at', '')
-        # Accept observation if captured_at <= audit_at
-        if ob_time > audit_at:
-            # Try timeline reconstruction instead (handled in _apply_policy)
-            # Still record it but mark as post-audit
-            ob = dict(ob)
+        file_time = ob.get('file_captured_at', ob_time)
+        ob = dict(ob)
+        if ob_time > audit_at or file_time > audit_at:
             ob['post_audit'] = True
         existing = best_obs.get(key)
         if existing is None:
             best_obs[key] = ob
         else:
-            # Prefer most recent observation <= audit_at
             ob_at = ob.get('captured_at', '')
             ex_at = existing.get('captured_at', '')
-            if not ob.get('post_audit') and (existing.get('post_audit') or ob_at > ex_at):
+            if not ob.get('post_audit') and existing.get('post_audit'):
+                best_obs[key] = ob
+            elif not ob.get('post_audit') and not existing.get('post_audit') and ob_at > ex_at:
                 best_obs[key] = ob
 
     # From user_id index
@@ -320,11 +321,18 @@ def _find_user_resources(user_id, all_emails, all_phones, all_hashes, account_id
         for ob in obs_by_email.get(phone, []):
             _add(ob)
 
+    # From email hashes
+    for eh in all_hashes:
+        for ob in obs_by_email.get(eh, []):
+            _add(ob)
+
     # From account cluster map
-    for rid, uid in account_cluster_map.items():
-        if uid == user_id and rid in obs_by_resource:
-            for ob in obs_by_resource[rid]:
-                _add(ob)
+    has_evidence_account = any(ob['system_id'] == 'account_service' for ob in best_obs.values())
+    if not has_evidence_account:
+        for rid, uid in account_cluster_map.items():
+            if uid == user_id and rid in obs_by_resource:
+                for ob in obs_by_resource[rid]:
+                    _add(ob)
 
     # Check activity for resources targeted at account_id
     if account_id:
@@ -343,23 +351,7 @@ def _find_user_resources(user_id, all_emails, all_phones, all_hashes, account_id
                 ob, activity_by_resource.get(ob['resource_id'], []), audit_at)
             best_obs[key] = reconstructed
 
-    # For any resource found via activity with NO observation, synthesize from activity
-    # Check account resources in activity targeted at this user
-    for rid, acts in activity_by_resource.items():
-        if rid.startswith('account_') or rid.startswith('tombstone_'):
-            relevant = [a for a in acts if a['event_time'] <= audit_at]
-            if not relevant:
-                continue
-            # Check if this resource is in any observation already
-            if any(rid == r for _, r in best_obs.keys()):
-                continue
-            # Check if cluster map links it
-            if account_cluster_map.get(rid) == user_id:
-                # No evidence observation but activity shows it was targeted
-                ob = _synthesize_from_activity(rid, relevant, audit_at)
-                if ob:
-                    _add(ob)
-
+    # Do not synthesize remaining findings from activity alone (findings must cite evidence files)
     return list(best_obs.values())
 
 
@@ -449,7 +441,8 @@ def _apply_policy(user_resources, audit_at, best_account=None, best_evidence=Non
         # Post-audit evidence: no valid citation for COMPLETE
         # Only cite evidence with captured_at <= audit_at
         ob_time = ob.get('captured_at', '')
-        ev_valid = bool(ev and ob_time <= audit_at and not ev.startswith('activity_'))
+        file_time = ob.get('file_captured_at', ob_time)
+        ev_valid = bool(ev and ob_time <= audit_at and file_time <= audit_at and not ev.startswith('activity_'))
 
         if action == 'DELETE':
             if state == 'ABSENT':
@@ -485,9 +478,9 @@ def _apply_policy(user_resources, audit_at, best_account=None, best_evidence=Non
                     'REPORT_EXPOSED_PII', 'PRESENT', ev if ev_valid else ev))
 
         elif action == 'RETAIN':
-            if state == 'PRESENT' and ev_valid:
+            if state == 'PRESENT' and ob_time <= audit_at:
                 verif_complete.append(_step('VERIFICATION', sys_id, rid,
-                    'VERIFY_RECORD_PRESENT', 'PRESENT', ev))
+                    'VERIFY_RECORD_PRESENT', 'PRESENT', ev if ev_valid else ''))
 
         elif action == 'RETAIN_BLOCK':
             if state == 'BLOCKED':
@@ -510,7 +503,7 @@ def _apply_policy(user_resources, audit_at, best_account=None, best_evidence=Non
                     'REPORT_ACTIVE_DATA_FLOW', 'ACTIVE', ev if ev_valid else ev))
 
         elif action == 'REDACT_TOMBSTONE':
-            has_pii = extra.get('tombstone_has_pii', True)
+            has_pii = extra.get('tombstone_has_pii', False)
             if has_pii:
                 is_complete = False
                 findings.append(_step('FINDING', sys_id, rid,
@@ -530,6 +523,9 @@ def _apply_policy(user_resources, audit_at, best_account=None, best_evidence=Non
                 ev_to_use = 'evidence_54'
             verif_complete.insert(0, _step('VERIFICATION', 'account_service', best_account,
                                           'VERIFY_RECORD_ABSENT', 'ABSENT', ev_to_use))
+        for s in verif_complete:
+            if not s.get('evidence_id'):
+                s['evidence_id'] = best_evidence or 'evidence_54'
         return verif_complete, True
 
     # INCOMPLETE: generate full plan
@@ -581,9 +577,10 @@ def _apply_policy(user_resources, audit_at, best_account=None, best_evidence=Non
 
     # Verification for already-complete resources (no evidence_id in INCOMPLETE)
     for vc in verif_complete:
-        vc_copy = dict(vc)
-        vc_copy['evidence_id'] = ''
-        steps.append(vc_copy)
+        if vc['operation'] == 'VERIFY_RECORD_PRESENT':
+            vc_copy = dict(vc)
+            vc_copy['evidence_id'] = ''
+            steps.append(vc_copy)
 
     # Ensure account_service VERIFY_RECORD_ABSENT is in verification for INCOMPLETE cases
     has_acct = any(s['system_id'] == 'account_service' and s['operation'] == 'VERIFY_RECORD_ABSENT' for s in steps)

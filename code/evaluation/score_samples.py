@@ -38,6 +38,8 @@ def run_and_score():
                 obs_by_email[ids['email']].append(ob)
             if ids.get('lookup_key'):
                 obs_by_email[ids['lookup_key']].append(ob)
+            if ids.get('email_hash'):
+                obs_by_email[ids['email_hash']].append(ob)
 
     activity_by_resource = defaultdict(list)
     for act in system_activity:
