@@ -653,10 +653,10 @@ def _load_log(file_id, path, captured_at):
 
                 rid = kv.get('resource_id', kv.get('entity_id', kv.get('account_id', kv.get('profile_id', kv.get('export_id', kv.get('entry_id', kv.get('job_id', kv.get('archive_id'))))))))
                 if not rid:
-                    rid_m = re.search(r'\b((?:search|analytics|support|export|data_flow|backup|tombstone|audit_record|account|marketing)_[a-zA-Z0-9_\-]*\d+[a-zA-Z0-9_\-]*)\b', clean)
+                    rid_m = re.search(r'\b((?:search|analytics|support|export|data_flow|backup|tombstone|audit_record|account|marketing)_[0-9]+)\b', clean)
                     rid = rid_m.group(1) if rid_m else None
 
-                if rid and (rid.endswith('_service') or rid.endswith('_platform') or rid in ('data_catalog', 'object_storage') or not any(c.isdigit() for c in rid)):
+                if rid and (rid.endswith('_service') or rid.endswith('_platform') or '_lookup_' in rid or rid in ('data_catalog', 'object_storage') or not any(c.isdigit() for c in rid)):
                     rid = None
 
                 sys_id = kv.get('service', kv.get('system', kv.get('function')))
@@ -709,7 +709,7 @@ def _load_log(file_id, path, captured_at):
                 marker_found = kv.get('marker_found')
 
                 state = 'PRESENT'
-                if status_code in ('404', 'NOT_FOUND', 'DELETED', 'ABSENT') or rows == '0':
+                if status_code in ('404', 'NOT_FOUND', 'DELETED', 'ABSENT', 'MISS') or rows == '0':
                     state = 'ABSENT'
                 elif marker_found == 'false':
                     state = 'PRESENT'
