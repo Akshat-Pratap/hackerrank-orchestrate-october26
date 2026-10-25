@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run pipeline on sample cases and score against sample_output.csv."""
+"""Score pipeline against sample_output.csv. Reports 01-06 and 07-32 separately."""
 import csv
 import json
 import os
@@ -9,99 +9,132 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from loaders import load_all_evidence, load_evidence_manifest
 from identity import build_identity_index
-from timeline import build_timeline
-from rules import decide_case
-from plan import build_steps
+from main import (load_csv, DATASET, CACHE_DIR, _is_non_deletion, _find_user_resources,
+                  _apply_policy, _number_steps, _build_account_cluster_map)
+from collections import defaultdict
 
-DATASET = os.path.join(os.path.dirname(__file__), '..', '..', 'dataset')
 SAMPLE_OUTPUT = os.path.join(DATASET, 'sample_output.csv')
 
 
-def load_csv(name):
-    path = os.path.join(DATASET, name)
-    with open(path, encoding='utf-8') as f:
-        return list(csv.DictReader(f))
-
-
-def main():
-    # Load base data
-    sample_requests = load_csv('sample_deletion_requests.csv')
+def run_and_score():
     user_identities = load_csv('user_identities.csv')
     user_audit_log = load_csv('user_audit_log.csv')
     system_activity = load_csv('system_activity.csv')
-    deletion_rules = load_csv('deletion_rules.csv')
     evidence_manifest = load_evidence_manifest(os.path.join(DATASET, 'evidence_files.csv'))
+    sample_requests = load_csv('sample_deletion_requests.csv')
 
     id_index = build_identity_index(user_identities, user_audit_log, system_activity)
-    all_observations = load_all_evidence(evidence_manifest, DATASET)
-    timeline = build_timeline(system_activity)
+    all_observations = load_all_evidence(evidence_manifest, DATASET, CACHE_DIR)
 
-    # Process sample cases
-    results = {}
-    for req in sample_requests:
-        status, steps = decide_case(req, id_index, all_observations, timeline,
-                                    deletion_rules, evidence_manifest)
-        numbered_steps = build_steps(steps, status)
-        results[req['case_id']] = {
-            'deletion_status': status,
-            'steps': numbered_steps,
-        }
+    obs_by_resource = defaultdict(list)
+    obs_by_user = defaultdict(list)
+    obs_by_email = defaultdict(list)
+    for file_id, obs_list in all_observations.items():
+        for ob in obs_list:
+            obs_by_resource[ob['resource_id']].append(ob)
+            ids = ob.get('identifiers', {})
+            if ids.get('user_id'):
+                obs_by_user[ids['user_id']].append(ob)
+            if ids.get('email'):
+                obs_by_email[ids['email']].append(ob)
+            if ids.get('lookup_key'):
+                obs_by_email[ids['lookup_key']].append(ob)
 
-    # Load truth
+    activity_by_resource = defaultdict(list)
+    for act in system_activity:
+        activity_by_resource[act['resource_id']].append(act)
+    for k in activity_by_resource:
+        activity_by_resource[k].sort(key=lambda a: a['event_time'])
+
+    account_cluster_map = _build_account_cluster_map(sample_requests, system_activity, id_index)
+
     with open(SAMPLE_OUTPUT, encoding='utf-8') as f:
         truth = {r['case_id']: r for r in csv.DictReader(f)}
 
-    # Score
-    sample_ids = sorted(truth.keys())
-    total = len(sample_ids)
-    status_correct = 0
-    step_exact = 0
+    results = {}
+    for req in sample_requests:
+        cid = req['case_id']
+        email = req['email'].strip().lower()
+        audit_at = req['audit_at']
+        request_text = req.get('request_text', '')
 
-    for cid in sample_ids:
-        t = truth[cid]
-        t_status = t['deletion_status']
-        t_steps = json.loads(t['steps_json'])
-
-        p = results.get(cid)
-        if p is None:
-            print(f"{cid}: MISSING from predictions")
+        user_id = id_index.resolve_email(email)
+        if user_id is None:
+            results[cid] = ('NOT_APPLICABLE', [])
             continue
 
-        p_status = p['deletion_status']
-        p_steps = p['steps']
+        identifiers = id_index.get_identifiers(user_id)
+        all_emails = identifiers.get('emails', set()) | {email}
+        all_phones = identifiers.get('phones', set())
+        all_hashes = identifiers.get('email_hashes', set())
+        account_id = identifiers.get('account_id', '')
 
-        sc = t_status == p_status
-        if sc:
-            status_correct += 1
+        if _is_non_deletion(request_text):
+            results[cid] = ('NOT_APPLICABLE', [])
+            continue
 
-        seq = t_steps == p_steps
-        if seq:
-            step_exact += 1
+        user_resources = _find_user_resources(
+            user_id, all_emails, all_phones, all_hashes, account_id,
+            obs_by_resource, obs_by_user, obs_by_email,
+            activity_by_resource, account_cluster_map, audit_at)
 
-        if not sc or not seq:
-            print(f"\n{cid}: status={p_status} (exp={t_status}) {'OK' if sc else 'WRONG'}")
-            if not seq:
+        steps, is_complete = _apply_policy(user_resources, audit_at)
+        status = 'COMPLETE' if is_complete else 'INCOMPLETE'
+        numbered = _number_steps(steps, status)
+        results[cid] = (status, numbered)
+
+    # Score separately for 01-06 and 07-32
+    groups = {
+        '01-06': [c for c in truth if int(c.replace('case_', '')) <= 6],
+        '07-32': [c for c in truth if int(c.replace('case_', '')) >= 7],
+    }
+
+    for grp_name, cids in groups.items():
+        cids = sorted(cids)
+        total = len(cids)
+        status_ok = 0
+        exact_ok = 0
+        diffs = []
+
+        for cid in cids:
+            t = truth[cid]
+            t_status = t['deletion_status']
+            t_steps = json.loads(t['steps_json'])
+
+            p_status, p_steps = results.get(cid, ('MISSING', []))
+
+            sc = t_status == p_status
+            if sc:
+                status_ok += 1
+
+            seq = t_steps == p_steps
+            if seq:
+                exact_ok += 1
+
+            if not sc or not seq:
                 t_set = set()
                 p_set = set()
                 for s in t_steps:
-                    t_set.add((s['phase'], s['system_id'], s['resource_id'], s['operation'], s['state'], s.get('evidence_id', '')))
+                    t_set.add((s['phase'], s['system_id'], s['resource_id'], s['operation'], s.get('evidence_id', '')))
                 for s in p_steps:
-                    p_set.add((s['phase'], s['system_id'], s['resource_id'], s['operation'], s['state'], s.get('evidence_id', '')))
-
-                missing = t_set - p_set
+                    p_set.add((s['phase'], s['system_id'], s['resource_id'], s['operation'], s.get('evidence_id', '')))
+                miss = t_set - p_set
                 extra = p_set - t_set
-                if missing:
-                    print(f"  missing({len(missing)}):")
-                    for m in sorted(missing)[:5]:
-                        print(f"    {m}")
-                if extra:
-                    print(f"  extra({len(extra)}):")
-                    for e in sorted(extra)[:5]:
-                        print(f"    {e}")
+                diffs.append((cid, t_status, p_status, miss, extra))
 
-    print(f"\n=== Status: {status_correct}/{total} ({100*status_correct/total:.1f}%) ===")
-    print(f"=== Exact: {step_exact}/{total} ({100*step_exact/total:.1f}%) ===")
+        print('\n=== Group %s (%d cases) ===' % (grp_name, total))
+        print('Status: %d/%d (%.0f%%)' % (status_ok, total, 100 * status_ok / total))
+        print('Exact:  %d/%d (%.0f%%)' % (exact_ok, total, 100 * exact_ok / total))
+
+        if diffs:
+            print('Diffs (%d):' % len(diffs))
+            for cid, ts, ps, miss, extra in diffs[:8]:
+                print('  %s exp=%s got=%s' % (cid, ts, ps))
+                for m in sorted(miss)[:3]:
+                    print('    MISS:', m[0][:4], m[1], m[2], m[3][:25], m[4])
+                for e in sorted(extra)[:2]:
+                    print('    XTRA:', e[0][:4], e[1], e[2], e[3][:25], e[4])
 
 
 if __name__ == '__main__':
-    main()
+    run_and_score()
