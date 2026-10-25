@@ -1,0 +1,11 @@
+system_id=integration_service
+resource_id=data_flow_1121
+email=jain.aditi@gmail.com
+destination=customer_analytics_warehouse
+mode=Continuous
+state=ACTIVE
+resource_id_2=data_flow_9846
+email_2=lucia-torres@gmail.com
+destination_2=customer_analytics_warehouse
+mode_2=Continuous
+state_2=ACTIVE

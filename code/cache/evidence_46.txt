@@ -1,0 +1,3 @@
+system_id=object_store
+state=PRESENT
+objects=delivery_confirmation_19.pdf,delivery_confirmation_20.pdf,return_label_4821.pdf,return_label_4876.pdf,invoice_NS-10493.pdf,parcel_damage_7713.jpg,customer_export_2026-02-10.zip,customer_export_2026-02-12.zip

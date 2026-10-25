@@ -1,0 +1,13 @@
+system_id=backup_service
+resource_id=backup_9291
+email=bluepeakco@outlook.com
+state=PRESENT
+resource_id_2=backup_9288
+email_2=miller.logistics@company.com
+state_2=PRESENT
+resource_id_3=backup_9287
+email_3=areed1433@gmail.com
+state_3=PRESENT
+resource_id_4=backup_9286
+email_4=summit-retail@company.com
+state_4=PRESENT

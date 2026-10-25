@@ -1,0 +1,6 @@
+system_id=analytics_platform
+resource_id=analytics_7438
+user_id=user_20
+name=Omar Darwish
+email=darwish.omar@icloud.com
+state=PRESENT

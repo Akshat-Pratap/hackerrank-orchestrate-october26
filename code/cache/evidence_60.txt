@@ -1,0 +1,6 @@
+system_id=marketing_service
+resource_id=marketing_001
+name=Soo-jin Park
+email=sj.park@naver.com
+phone=+82 10-5837-9451
+state=PRESENT

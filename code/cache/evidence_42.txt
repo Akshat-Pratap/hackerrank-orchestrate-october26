@@ -1,0 +1,6 @@
+system_id=identity_service
+resource_id=tombstone_user_17
+user_id=user_17
+state=PRESENT
+type=Customer key
+status=Retained reference

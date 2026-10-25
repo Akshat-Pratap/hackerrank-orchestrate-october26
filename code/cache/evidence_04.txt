@@ -1,0 +1,8 @@
+system_id=account_service
+resource_id=account_5762
+user_id=user_11
+name=Haruka Sato
+email=haruka.s1838@zoho.com
+phone=+81 90 7610 2507
+state=PRESENT
+support_id=support_9538

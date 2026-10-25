@@ -1,0 +1,9 @@
+system_id=search_service
+resource_id=search_428
+user_id=user_13
+name=Gabriel Silva
+email=g.silva76@gmail.com
+state=PRESENT
+resource_id_2=search_1874
+email_2=g.silva76.jr@gmail.com
+state_2=PRESENT

@@ -1,0 +1,17 @@
+system_id=export_service
+resource_id=export_1261
+email=marcus.lee@northstar.shop
+state=PRESENT
+status=Collecting
+resource_id_2=export_1260
+email_2=ingrid.dahl@outlook.com
+state_2=PRESENT
+status_2=Ready
+resource_id_3=export_1259
+email_3=sara.kim@northstar.shop
+state_3=PRESENT
+status_3=Packaging
+resource_id_4=export_1258
+email_4=daniel.park@northstar.shop
+state_4=PRESENT
+status_4=Ready
