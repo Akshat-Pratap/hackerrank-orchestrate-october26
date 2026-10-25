@@ -96,18 +96,41 @@ def load_all_evidence(manifest, dataset_root, cache_dir=None):
 
 
 # ── SQL loader ─────────────────────────────────────────────────────────────────
+# ── SQL loader ─────────────────────────────────────────────────────────────────
+_COLLECTION_MAPPING = {
+    'customer_profiles': ('account_service', 'USER_PROFILE'),
+    'customer_analytics_reports': ('analytics_platform', 'ANALYTICS_PROFILE'),
+    'customer_search_documents': ('search_service', 'SEARCH_INDEX_ENTRY'),
+    'support_conversations': ('support_platform', 'SUPPORT_MESSAGE'),
+    'ticket_attachments': ('support_platform', 'SUPPORT_ATTACHMENT'),
+    'connector_configurations': ('integration_service', 'DATA_FLOW'),
+    'backup_catalog': ('backup_service', 'BACKUP_ARCHIVE'),
+    'customer_export_jobs': ('export_service', 'USER_EXPORT'),
+    'security_audit_events': ('security_service', 'SECURITY_AUDIT_LOG'),
+    'deleted_customer_references': ('account_service', 'ACCOUNT_TOMBSTONE'),
+    'retained_order_records': ('legal_service', 'LEGAL_HOLD_RECORD'),
+}
+
 _SYSTEM_FROM_TABLE = {
+    'customer_profiles': ('account_service', 'USER_PROFILE'),
     'customer_profiles_primary': ('account_service', 'USER_PROFILE'),
     'customer_profiles_failover_replica': ('account_service', 'USER_PROFILE'),
     'customer_profiles_reporting_replica': ('account_service', 'USER_PROFILE'),
     'customer_profiles_regional_replica': ('account_service', 'USER_PROFILE'),
+    'customer_search_documents': ('search_service', 'SEARCH_INDEX_ENTRY'),
+    'search_documents_primary': ('search_service', 'SEARCH_INDEX_ENTRY'),
     'search_index_entries': ('search_service', 'SEARCH_INDEX_ENTRY'),
+    'customer_analytics_profiles': ('analytics_platform', 'ANALYTICS_PROFILE'),
     'analytics_profiles': ('analytics_platform', 'ANALYTICS_PROFILE'),
+    'support_records': ('support_platform', 'SUPPORT_MESSAGE'),
     'support_messages': ('support_platform', 'SUPPORT_MESSAGE'),
     'support_attachments': ('support_platform', 'SUPPORT_ATTACHMENT'),
-    'email_delivery_logs': ('notification_service', 'EMAIL_DELIVERY_LOG'),
-    'security_audit_records': ('security_service', 'SECURITY_AUDIT_LOG'),
+    'customer_exports': ('export_service', 'USER_EXPORT'),
     'user_exports': ('export_service', 'USER_EXPORT'),
+    'connector_subscriptions': ('integration_service', 'DATA_FLOW'),
+    'backup_restore_entries': ('backup_service', 'BACKUP_ARCHIVE'),
+    'security_audit_records': ('security_service', 'SECURITY_AUDIT_LOG'),
+    'email_delivery_logs': ('notification_service', 'EMAIL_DELIVERY_LOG'),
     'tombstones': ('account_service', 'ACCOUNT_TOMBSTONE'),
     'cache_entries': ('cache_service', 'CACHE_ENTRY'),
     'marketing_profiles': ('marketing_service', 'MARKETING_PROFILE'),
@@ -129,62 +152,174 @@ def _load_sql(file_id, path, captured_at):
     cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
     tables = [r[0] for r in cur.fetchall()]
 
-    for table in tables:
-        sys_id, cat = _SYSTEM_FROM_TABLE.get(table, ('unknown_service', 'UNKNOWN'))
+    has_customer_data_primary = 'customer_data_primary' in tables
+    primary_rids = set()
+    if has_customer_data_primary:
         try:
-            cur.execute('SELECT * FROM %s' % table)
-            cols = [d[0] for d in cur.description]
-            for row in cur.fetchall():
-                rec = dict(zip(cols, row))
-                rid = rec.get('resource_id') or rec.get('id') or rec.get('user_id', '')
-                if not rid:
-                    continue
-
-                # Determine state
-                state = 'PRESENT'
-                if rec.get('deleted_at') or rec.get('is_deleted'):
-                    state = 'ABSENT'
-                elif rec.get('anonymized_at') or rec.get('is_anonymized'):
-                    state = 'ANONYMIZED'
-                elif rec.get('redacted_at') or rec.get('is_redacted'):
-                    state = 'REDACTED'
-                elif cat == 'ACCOUNT_TOMBSTONE':
-                    # Tombstone: PII present if name/email/phone fields populated
-                    has_pii = bool(rec.get('email') or rec.get('name') or rec.get('phone'))
-                    state = 'PRESENT'
-                    ob = {
-                        'file_id': file_id, 'system_id': sys_id,
-                        'resource_id': rid, 'category': cat,
-                        'state': state, 'captured_at': captured_at,
-                        'identifiers': _ids(
-                            user_id=rec.get('user_id') or rec.get('customer_reference'),
-                            email=rec.get('email', '').lower() if rec.get('email') else None,
-                            phone=rec.get('phone'),
-                            email_hash=rec.get('email_hash'),
-                        ),
-                        'extra': {'tombstone_has_pii': has_pii,
-                                  'table': table, 'replica': table},
-                    }
-                    obs.append(ob)
-                    continue
-
-                ob = {
-                    'file_id': file_id, 'system_id': sys_id,
-                    'resource_id': rid, 'category': cat,
-                    'state': state, 'captured_at': captured_at,
-                    'identifiers': _ids(
-                        user_id=rec.get('user_id') or rec.get('customer_reference'),
-                        email=(rec.get('email', '') or '').lower() or None,
-                        phone=rec.get('phone'),
-                        email_hash=rec.get('email_hash'),
-                        lookup_key=(rec.get('lookup_key', '') or '').lower() or None,
-                    ),
-                    'extra': {'table': table, 'retention_until': rec.get('retention_until'),
-                              'replica': table},
-                }
-                obs.append(ob)
+            cur.execute("SELECT resource_id FROM customer_data_primary")
+            primary_rids = {r[0] for r in cur.fetchall()}
         except Exception:
             pass
+
+    for table in tables:
+        if table == 'snapshot_scope':
+            continue
+
+        if table.startswith('customer_data_'):
+            is_primary = (table == 'customer_data_primary')
+            is_replica = not is_primary
+            try:
+                cur.execute('SELECT * FROM %s' % table)
+                cols = [d[0] for d in cur.description]
+                for row in cur.fetchall():
+                    rec = dict(zip(cols, row))
+                    rid = rec.get('resource_id', '')
+                    if not rid:
+                        continue
+                    sys_id = rec.get('origin_system', '')
+                    coll = rec.get('collection_name', '')
+                    if coll in _COLLECTION_MAPPING:
+                        def_sys, cat = _COLLECTION_MAPPING[coll]
+                        if not sys_id:
+                            sys_id = def_sys
+                    else:
+                        cat = 'UNKNOWN'
+
+                    rj_str = rec.get('record_json', '')
+                    try:
+                        rj = json.loads(rj_str) if isinstance(rj_str, str) else (rj_str or {})
+                    except Exception:
+                        rj = {}
+
+                    doc = rj.get('document') if isinstance(rj.get('document'), dict) else {}
+                    uid = (rj.get('user_id') or rj.get('customer_reference') or 
+                           rj.get('subject_reference') or doc.get('customer_reference') or 
+                           doc.get('user_id'))
+                    sel = rj.get('subject_selector')
+                    if sel:
+                        if '@' in sel:
+                            pass
+                        elif sel.startswith('user_'):
+                            if not uid:
+                                uid = sel
+
+                    email = (rj.get('email') or rj.get('owner_email') or 
+                             rj.get('requester_email') or doc.get('email') or 
+                             (sel if sel and '@' in sel else None))
+                    phone = (rj.get('phone') or rj.get('owner_phone') or 
+                             rj.get('requester_phone') or doc.get('phone'))
+                    email_hash = rj.get('email_hash') or doc.get('email_hash')
+
+                    if not email and rj.get('message_text'):
+                        m = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', rj['message_text'])
+                        if m:
+                            email = m.group(0)
+
+                    if cat in ('USER_PROFILE', 'SEARCH_INDEX_ENTRY', 'USER_EXPORT', 'SUPPORT_ATTACHMENT', 'LEGAL_HOLD_RECORD', 'SECURITY_AUDIT_LOG'):
+                        state = 'PRESENT'
+                    elif cat == 'ANALYTICS_PROFILE':
+                        has_pii = bool(uid or email or phone or email_hash)
+                        state = 'PRESENT' if has_pii else 'ANONYMIZED'
+                    elif cat == 'SUPPORT_MESSAGE':
+                        txt = rj.get('message_text', '')
+                        state = 'REDACTED' if '[REDACTED]' in txt else 'PRESENT'
+                    elif cat == 'DATA_FLOW':
+                        state = 'ACTIVE' if rj.get('enabled', True) else 'DISABLED'
+                    elif cat == 'BACKUP_ARCHIVE':
+                        state = 'ACTIVE' if rj.get('restore_allowed', True) else 'BLOCKED'
+                    elif cat == 'ACCOUNT_TOMBSTONE':
+                        has_pii = bool(email or phone or rj.get('full_name') or rj.get('name'))
+                        state = 'PRESENT' if has_pii else 'REDACTED'
+                    else:
+                        state = 'PRESENT'
+
+                    drift = bool(is_replica and has_customer_data_primary and rid not in primary_rids)
+
+                    ob = {
+                        'file_id': file_id,
+                        'system_id': sys_id,
+                        'resource_id': rid,
+                        'category': cat,
+                        'state': state,
+                        'captured_at': captured_at,
+                        'identifiers': _ids(
+                            user_id=uid,
+                            email=email,
+                            phone=phone,
+                            email_hash=email_hash,
+                        ),
+                        'extra': {
+                            'table': table,
+                            'is_primary': is_primary,
+                            'is_replica': is_replica,
+                            'replication_drift': drift,
+                            'tombstone_has_pii': (cat == 'ACCOUNT_TOMBSTONE' and state == 'PRESENT'),
+                        }
+                    }
+                    obs.append(ob)
+            except Exception:
+                pass
+        else:
+            sys_id, cat = _SYSTEM_FROM_TABLE.get(table, ('unknown_service', 'UNKNOWN'))
+            try:
+                cur.execute('SELECT * FROM %s' % table)
+                cols = [d[0] for d in cur.description]
+                for row in cur.fetchall():
+                    rec = dict(zip(cols, row))
+                    rid = rec.get('resource_id') or rec.get('id') or rec.get('user_id', '')
+                    if not rid:
+                        continue
+
+                    uid = rec.get('user_id') or rec.get('customer_reference') or rec.get('subject_reference')
+                    email = (rec.get('email') or rec.get('customer_email') or rec.get('owner_email') or rec.get('requester_email') or '')
+                    phone = rec.get('phone') or rec.get('owner_phone') or rec.get('requester_phone')
+                    email_hash = rec.get('email_hash')
+                    lookup_key = rec.get('source_resource_id') or rec.get('lookup_key')
+
+                    state = 'PRESENT'
+                    if rec.get('deleted_at') or rec.get('is_deleted') or rec.get('account_status') == 'DELETED':
+                        state = 'ABSENT'
+                    elif rec.get('anonymized_at') or rec.get('is_anonymized'):
+                        state = 'ANONYMIZED'
+                    elif rec.get('redacted_at') or rec.get('is_redacted'):
+                        state = 'REDACTED'
+                    elif cat == 'ANALYTICS_PROFILE':
+                        has_pii = bool(uid or email or phone or email_hash)
+                        state = 'PRESENT' if has_pii else 'ANONYMIZED'
+                    elif cat == 'SUPPORT_MESSAGE':
+                        state = 'REDACTED' if '[REDACTED]' in (rec.get('message_excerpt') or '') else 'PRESENT'
+                    elif cat == 'DATA_FLOW':
+                        state = 'ACTIVE' if rec.get('enabled') in (1, '1', True, 'true', 'TRUE') else 'DISABLED'
+                    elif cat == 'BACKUP_ARCHIVE':
+                        state = 'ACTIVE' if rec.get('restore_allowed') in (1, '1', True, 'true', 'TRUE') else 'BLOCKED'
+                    elif cat == 'ACCOUNT_TOMBSTONE':
+                        has_pii = bool(email or phone or rec.get('full_name') or rec.get('name'))
+                        state = 'PRESENT' if has_pii else 'REDACTED'
+
+                    ob = {
+                        'file_id': file_id,
+                        'system_id': sys_id,
+                        'resource_id': rid,
+                        'category': cat,
+                        'state': state,
+                        'captured_at': captured_at,
+                        'identifiers': _ids(
+                            user_id=uid,
+                            email=email,
+                            phone=phone,
+                            email_hash=email_hash,
+                            lookup_key=lookup_key,
+                        ),
+                        'extra': {
+                            'table': table,
+                            'retention_until': rec.get('retention_until'),
+                            'tombstone_has_pii': (cat == 'ACCOUNT_TOMBSTONE' and state == 'PRESENT'),
+                            'replica': table,
+                        }
+                    }
+                    obs.append(ob)
+            except Exception:
+                pass
 
     conn.close()
     return obs
