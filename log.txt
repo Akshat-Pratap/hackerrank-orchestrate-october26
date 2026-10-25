@@ -30,3 +30,35 @@ branch=main
 repo_root=d:\My Projects\Hackathons\hackerrank-orchestrate-october26
 worktree=main
 parent_agent=none
+
+## [2026-10-25T12:03:00+05:30] Cluster Coverage, Multi-Format Logs, Reports & Packaging
+
+User Prompt (verbatim, secrets redacted):
+Next steps, in order. Terse replies.
+1. Add code/evaluation/coverage.py: groups the 518 cases by audit_at, prints per cluster: n, #NOT_APPLICABLE, #COMPLETE, #INCOMPLETE, #cases with account-only steps, avg steps. Healthy clusters have ~5-9 avg steps and mostly INCOMPLETE; flag clusters with avg<2.5 or >=3 account-only cases.
+2. Fix flagged clusters by reading their raw evidence and extending the loaders generically (no hardcoding):
+   - 2026-06-08T10:00, evidence_25 (cloud_runtime_export_us_west_20260608.log): all 10 cases are COMPLETE with 1 step. Extract all systems (search, analytics, support, export, data_flow, backup, security, tombstone).
+   - 2026-02-03T06:00, evidence_48 (operations_stream_me_central_20260203.log), 2026-02-13T08:00, evidence_63 (+ evidence_46 image cache), 2026-03-25T09:00, evidence_39 (syslog_archive_ap_southeast_20260325.log).
+   After each fix, re-run score_samples.py; revert if 07-32 status or exact drops. Commit.
+3. Check the 21 stray cases (unique audit_at): 9 NOT_APPLICABLE + 10 INCOMPLETE + 2 COMPLETE. For the non-NA ones, state must come from system_activity events <= audit_at (later evidence is not state). Spot check 3 of them against raw activity and report in one line each.
+4. Now (don't wait): write code/README.md (setup, `python3 code/main.py`, design, rules), code/evaluation/evaluation_report.md (sample metrics for groups 01-06 / 07-32, field-level and sequence accuracy, >=3 custom cases under code/evaluation/cases/ with expected outputs and results, failures found, improvements made), code/evaluation/usage_report.md (0 model calls, 0 tokens, $0; state that the pipeline is deterministic with a vision-read cache). Remove empty code/evaluation/main.py or make it run score_samples + coverage. Update both reports again at the end.
+5. HARD FREEZE at <TIME>: regenerate output.csv, validate, final reports, `zip -r code.zip README.md code -x "*/__pycache__/*" "*/.venv/*" "*/.git/*"` (or the PowerShell equivalent). Do not start new rewrites after the freeze.
+
+Agent Response Summary:
+Created code/evaluation/coverage.py audit tool which identified and flagged clusters with low step averages. Extended loaders generically to handle escaped quotes, pipes, syslog headers, and case-insensitive email matching, reducing flagged clusters from 3 down to 0 across all 72 clusters while maintaining sample benchmark scores (81% status, 50% exact on 07-32). Spot-checked stray cases against historical activity, authored complete documentation and evaluation reports including 3 custom edge cases, and generated validated output.csv and packaged code.zip.
+
+Actions:
+* Created code/evaluation/coverage.py, code/evaluation/cases/cases.json, code/evaluation/cases/run_cases.py
+* Updated code/loaders.py to support cloud runtime exports, pipes, syslog headers, and lowercase SQL emails
+* Wrote code/README.md, README.md, code/evaluation/evaluation_report.md, code/evaluation/usage_report.md
+* Configured code/evaluation/main.py to run both benchmark and coverage audits
+* Built package script and generated compliant code.zip (56.3 KB)
+* Committed updates (7149b50, 375c8c9, a14abe4)
+
+Context:
+tool=Antigravity IDE
+model=Gemini 3.8 Flash (High)
+branch=main
+repo_root=d:\My Projects\Hackathons\hackerrank-orchestrate-october26
+worktree=main
+parent_agent=none
